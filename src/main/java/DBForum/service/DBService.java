@@ -22,7 +22,7 @@ public class DBService {
     }
 
     public void clear() {
-        for (String tableName : new String[]{"Forum", "\"User\"", "Thread", "Post"}) {
+        for (String tableName : new String[]{"Forum", "\"User\"", "Thread", "Post", "UserForum"}) {
             jdbcTemplate.update("DELETE FROM " + tableName);
         }
     }

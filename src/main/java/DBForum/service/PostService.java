@@ -4,76 +4,83 @@ import DBForum.mappers.PostMapper;
 import DBForum.models.PostModel;
 import DBForum.models.ThreadModel;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataRetrievalFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.support.JdbcDaoSupport;
 import org.springframework.stereotype.Repository;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import javax.sql.DataSource;
+import java.sql.*;
+import java.util.*;
+
 
 /**
  * Created by sergey on 15.03.17.
  */
 @Repository
-public class PostService {
+public class PostService extends JdbcDaoSupport {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
-    public void create(PostModel postModel) {
-        final ArrayList<String> field = new ArrayList<>();
-        final ArrayList<Object> values = new ArrayList<>();
-
-        if (!isEmptyField(postModel.getAuthor())) {
-            field.add("author");
-            values.add(postModel.getAuthor());
-        }
-
-        if (!isEmptyField(postModel.getForum())) {
-            field.add("forum");
-            values.add(postModel.getForum());
-        }
-
-        if (!isEmptyField(postModel.getMessage())) {
-            field.add("message");
-            values.add(postModel.getMessage());
-        }
-
-        if(postModel.getCreated() != null) {
-            field.add("created");
-            values.add(postModel.getCreated());
-        }
-
-        if(postModel.getIsEdited() != null) {
-            field.add("isEdited");
-            values.add(postModel.getIsEdited());
-        } else {
-            field.add("isEdited");
-            values.add(false);
-        }
-
-        if(postModel.getParent() != null) {
-            field.add("parent");
-            values.add(postModel.getParent());
-        }
-
-        if(postModel.getThread() != null) {
-            field.add("thread");
-            values.add(postModel.getThread());
-        }
-
-        String query = "INSERT INTO Post (" + String.join(", ", field) +
-                ") VALUES (" + String.join(", ", Collections.nCopies(values.size(), "?")) +")";
-        jdbcTemplate.update(query, values.toArray());
+    @Autowired
+    public PostService(DataSource dataSource) {
+        super();
+        setDataSource(dataSource);
     }
 
-    public List<PostModel> getPostsWhereIdGreater(Integer id) {
-        return jdbcTemplate.query("SELECT * FROM Post WHERE id > ? ORDER BY id",
-                new Object[]{id}, new PostMapper());
+    public void create(List<PostModel> posts) {
+
+        try (Connection connection = getJdbcTemplate().getDataSource().getConnection()) {
+            PreparedStatement preparedStatement = connection.prepareStatement(
+                    "INSERT INTO Post (author, created, forum, id, message, parent, thread, tree) VALUES(" +
+                    "?, ?, ?, ?, ?, ?, ?, array_append((SELECT tree FROM Post WHERE id = ?), ?))", Statement.NO_GENERATED_KEYS);
+
+
+            for (PostModel post : posts) {
+                final Integer id = getJdbcTemplate().queryForObject("SELECT nextval('post_id_seq')", Integer.class);
+                preparedStatement.setString(1, post.getAuthor());
+                preparedStatement.setTimestamp(2, post.getCreated());
+                preparedStatement.setString(3, post.getForum());
+                preparedStatement.setInt(4, id);
+                preparedStatement.setString(5, post.getMessage());
+                preparedStatement.setInt(6, post.getParent() == null ? 0 : post.getParent());
+                preparedStatement.setInt(7, post.getThread());
+                preparedStatement.setInt(8, post.getParent() == null ? 0 : post.getParent());
+                preparedStatement.setInt(9, id);
+                preparedStatement.addBatch();
+                post.setId(id);
+            }
+
+            preparedStatement.executeBatch();
+            preparedStatement.close();
+
+        } catch (SQLException e) {
+            throw new DataRetrievalFailureException(null);
+        }
     }
 
+    public void updateUserForum(List<PostModel> posts, String forumSlug) {
+        HashSet<String> authors = new HashSet<String>();
+        for(PostModel post : posts) {
+            authors.add(post.getAuthor());
+        }
 
-    public Integer getLastPostId() {
-        return jdbcTemplate.queryForObject("SELECT max(id) FROM Post", Integer.class);
+        try (Connection connection = getJdbcTemplate().getDataSource().getConnection()) {
+            PreparedStatement preparedStatement = connection.prepareStatement(
+                    "INSERT INTO UserForum (user_nickname, forum) VALUES (?::citext, ?::citext) ON CONFLICT DO NOTHING",
+                    Statement.NO_GENERATED_KEYS);
+            for(String author : authors) {
+                preparedStatement.setString(1, author);
+                preparedStatement.setString(2, forumSlug);
+                preparedStatement.addBatch();
+            }
+
+            preparedStatement.executeBatch();
+            preparedStatement.close();
+
+        } catch (SQLException e) {
+            throw new DataRetrievalFailureException(null);
+        }
     }
 
     public PostModel getPostById(Integer id) {
@@ -130,18 +137,11 @@ public class PostService {
     public List<PostModel> getTreeSortedPosts(ThreadModel threadModel, Integer limit, Integer marker, Boolean desc) {
         Integer id = threadModel.getId();
         final ArrayList<Object> values = new ArrayList<>();
-        String query = "WITH RECURSIVE recursetree (id, path) AS (" +
-                " SELECT id, array_append('{}'::INTEGER[], id) FROM Post"+
-                " WHERE parent = 0 AND thread = ?" +
-                " UNION ALL"+
-                " SELECT p.id, array_append(path, p.id)"+
-                " FROM Post p"+
-                " JOIN recursetree rt ON rt.id = p.parent AND p.thread = ?"+
-                " )"+
-                " SELECT p.* FROM recursetree JOIN Post p ON recursetree.id = p.id"+
-                " ORDER BY recursetree.path";
+        String query =  " SELECT u.nickname, p.* FROM Post p" +
+                " JOIN \"User\" u ON (u.nickname = p.author)" +
+                " WHERE p.thread = ?" +
+                " ORDER BY tree";
 
-        values.add(id);
         values.add(id);
         if (desc) {
             query += " DESC";
@@ -162,11 +162,18 @@ public class PostService {
         Integer id = threadModel.getId();
         final ArrayList<Object> values = new ArrayList<>();
 
-        String query = "WITH RECURSIVE recursetree (id, path) AS (" +
-                " SELECT id, array_append('{}'::INTEGER[], id) FROM" +
-                " (SELECT DISTINCT id FROM Post" +
-                " WHERE thread = ? AND parent = 0" +
-                " ORDER BY id ";
+        String query = "WITH RECURSIVE " +
+                "cond AS (" +
+                " SELECT u.nickname, p.* FROM Post p " +
+                " JOIN \"User\" u ON (u.nickname = p.author)" +
+                " JOIN Forum f ON (f.slug = p.forum)" +
+                " WHERE p.thread = ?" +
+                "), " +
+                " recursetree AS (" +
+                " (SELECT * FROM cond" +
+                " WHERE parent = 0" +
+                " ORDER BY id";
+
         values.add(id);
 
         if (desc) {
@@ -183,14 +190,12 @@ public class PostService {
             values.add(marker);
         }
 
-        query += ") superParents " +
-                "UNION ALL " +
-                "SELECT p.id, array_append(path, p.id) FROM Post p " +
-                "JOIN recursetree rp ON rp.id = p.parent " +
-                ") " +
-                "SELECT p.* " +
-                "FROM recursetree JOIN Post p ON recursetree.id = p.id " +
-                "ORDER BY recursetree.path ";
+        query += ") UNION ALL" +
+                " (SELECT cond.* FROM recursetree"+
+                " JOIN cond ON recursetree.id = cond.parent)"+
+                ")"+
+                " SELECT * FROM recursetree"+
+                " ORDER BY recursetree.tree";
 
         if (desc) {
             query += " DESC ";
@@ -202,5 +207,4 @@ public class PostService {
     private Boolean isEmptyField(String field) {
         return field == null || field.isEmpty();
     }
-
 }

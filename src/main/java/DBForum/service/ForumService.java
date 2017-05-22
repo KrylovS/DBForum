@@ -44,23 +44,21 @@ public class ForumService {
 
     public List<UserModel> getUsers(String slug, Integer limit, String since, Boolean desc) {
         ArrayList<Object> parameters = new ArrayList<>();
-        String query = "SELECT * FROM \"User\" WHERE \"User\".nickname IN " +
-                "(SELECT POST.author FROM POST WHERE POST.forum = ?::citext " +
-                "UNION " +
-                "SELECT Thread.author FROM Thread WHERE Thread.forum = ?::citext)";
-        parameters.add(slug);
+        String query = "SELECT * FROM \"User\" u WHERE u.nickname IN " +
+               "(SELECT user_nickname FROM UserForum " +
+                "WHERE forum = ?::citext)";
         parameters.add(slug);
 
         if (!since.isEmpty() && since != null) {
             if (desc) {
-                query += " AND \"User\".nickname < ?::citext ";
+                query += " AND u.nickname < ?::citext ";
             } else {
-                query += " AND \"User\".nickname  > ?::citext ";
+                query += " AND u.nickname  > ?::citext ";
             }
             parameters.add(since);
         }
 
-        query += "ORDER BY LOWER(\"User\".nickname)";
+        query += "ORDER BY LOWER(u.nickname)";
 
         if (desc) {
             query += " DESC ";
@@ -73,6 +71,5 @@ public class ForumService {
 
         return jdbcTemplate.query(query, parameters.toArray(), new UserMapper());
     }
-
 
 }

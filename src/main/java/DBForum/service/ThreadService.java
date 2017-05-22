@@ -7,7 +7,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**
@@ -20,16 +19,13 @@ public class ThreadService {
 
     public ThreadModel getThread(ThreadModel threadModel) {
         if(!isEmptyField(threadModel.getSlug())) {
-            String SQL = "SELECT * FROM Thread WHERE slug = ?::citext";
             return jdbcTemplate.queryForObject("SELECT * FROM Thread WHERE slug = ?::citext",
                     new Object[]{threadModel.getSlug()}, new ThreadMapper());
         } else {
-            String SQL = "SELECT * FROM Thread WHERE forum = ? AND title = ?";
             return jdbcTemplate.queryForObject("SELECT * FROM Thread WHERE forum = ? AND title = ?",
                     new Object[]{threadModel.getForum(), threadModel.getTitle()}, new ThreadMapper());
         }
     }
-
 
     public ThreadModel getThreadBySlug(String slug) {
         return jdbcTemplate.queryForObject("SELECT * FROM Thread WHERE slug = ?::citext",
@@ -42,67 +38,39 @@ public class ThreadService {
     }
 
     public void createThread(ThreadModel threadModel) {
-        final ArrayList<String> fields = new ArrayList<>();
         final ArrayList<Object> values = new ArrayList<>();
 
-        if (!isEmptyField(threadModel.getAuthor())) {
-            fields.add("author");
-            values.add(threadModel.getAuthor());
-        }
-
-        if (!isEmptyField(threadModel.getSlug())) {
-            fields.add("slug");
-            values.add(threadModel.getSlug());
-        }
-
-        if (!isEmptyField(threadModel.getForum())) {
-            fields.add("forum");
-            values.add(threadModel.getForum());
-        }
-
-        if (!isEmptyField(threadModel.getMessage())) {
-            fields.add("message");
-            values.add(threadModel.getMessage());
-        }
-
-        if (!isEmptyField(threadModel.getTitle())) {
-            fields.add("title");
-            values.add(threadModel.getTitle());
+        values.add(threadModel.getAuthor());
+        values.add(threadModel.getSlug());
+        values.add(threadModel.getForum());
+        values.add(threadModel.getMessage());
+        values.add(threadModel.getTitle());
+        if(threadModel.getVotes() != null) {
+            values.add(threadModel.getVotes());
+        } else {
+            values.add(0);
         }
 
         if(threadModel.getCreated() != null) {
-            fields.add("created");
             values.add(threadModel.getCreated());
+            jdbcTemplate.update("INSERT INTO Thread (author, slug, forum, message, title, votes, created) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) ", values.toArray());
+        } else {
+            jdbcTemplate.update("INSERT INTO Thread (author, slug, forum, message, title, votes) " +
+                    "VALUES (?, ?, ?, ?, ?, ?) ", values.toArray());
         }
-
-        if(threadModel.getId() != null) {
-            fields.add("id");
-            values.add(threadModel.getId());
-        }
-
-        if(threadModel.getVotes() != null) {
-            fields.add("votes");
-            values.add(threadModel.getVotes());
-        }
-
-        String query = "INSERT INTO Thread (" + String.join(", ", fields) +
-                ") VALUES (" + String.join(", ", Collections.nCopies(values.size(), "?")) +")";
-        jdbcTemplate.update(query, values.toArray());
-
-
     }
 
     public List<ThreadModel> getThreads(String slug, Integer limit, String since, Boolean desc) {
-        final ArrayList<Object> variable = new ArrayList<>();
-        variable.add(slug);
-        String query = "SELECT * FROM Thread Where forum = ?";
+        final ArrayList<Object> values = new ArrayList<>();
+        values.add(slug);
+        String query = "SELECT * FROM Thread WHERE forum = ?";
         if(!isEmptyField(since)) {
             if(desc) {
                 query += " AND created <= " + "'" + since + "'";
             } else {
                 query += " AND created >= " + "'" + since + "'";
             }
-            //variable.add(since);
         }
 
         if(desc) {
@@ -111,19 +79,16 @@ public class ThreadService {
             query += " ORDER BY created";
         }
 
-        if(limit > 0) {
+        //if(limit > 0) {
             query += " LIMIT ?";
-            variable.add(limit);
-        }
+            values.add(limit);
+        //}
 
-        return jdbcTemplate.query(query, variable.toArray(), new ThreadMapper());
+        return jdbcTemplate.query(query, values.toArray(), new ThreadMapper());
     }
 
     public void vote(Integer threadId, Integer userId, Integer voiceValue) {
             if (voiceValue == 2) {
-                /*jdbcTemplate.update("UPDATE Thread SET votes = votes + ? WHERE id = ?; " +
-                        "UPDATE UserVoteThread SET voice = 1 WHERE threadId = ? AND userId = ?",
-                        voiceValue, threadId, threadId, userId);*/
                 jdbcTemplate.update("UPDATE Thread SET votes = votes + ? WHERE id = ?; ",
                         voiceValue, threadId);
 
@@ -138,18 +103,12 @@ public class ThreadService {
 
     public void unvote(Integer threadId, Integer userId, Integer unvoiceValue) {
         if (unvoiceValue == 2) {
-            /*jdbcTemplate.update("UPDATE Thread SET votes = votes - ? WHERE id = ?; " +
-                            "UPDATE UserVoteThread SET voice = -1 WHERE threadId = ? AND userId = ?",
-                    unvoiceValue, threadId, threadId, userId);*/
             jdbcTemplate.update("UPDATE Thread SET votes = votes - ? WHERE id = ?; ",
                               unvoiceValue, threadId);
 
             jdbcTemplate.update("UPDATE UserVoteThread SET voice = -1 WHERE threadId = ? AND userId = ?",
                     threadId, userId);
         } else {
-            /*jdbcTemplate.update("UPDATE Thread SET votes = votes - 1 WHERE id = ?; " +
-                            "INSERT INTO UserVoteThread (threadId, userId, voice) VALUES (?, ?, -1)",
-                    threadId, threadId, userId);*/
             jdbcTemplate.update("UPDATE Thread SET votes = votes - 1 WHERE id = ?; ",
                     threadId);
             jdbcTemplate.update("INSERT INTO UserVoteThread (threadId, userId, voice) VALUES (?, ?, -1)",
@@ -178,10 +137,14 @@ public class ThreadService {
 
         if(values.size() > 0) {
             values.add(threadModel.getId());
-            jdbcTemplate.update("UPDATE Thread SET " + String.join(", ", fields) +
-                     " WHERE id = ?",
-                    values.toArray());
+            jdbcTemplate.update("UPDATE Thread SET " + String.join(", ", fields) + " WHERE id = ?", values.toArray());
         }
+    }
+
+    public void updateUserForum(ThreadModel thread, String forumSlug) {
+        jdbcTemplate.update("INSERT INTO UserForum (user_nickname, forum)  VALUES (?::citext, ?::citext)" +
+                        " ON CONFLICT DO NOTHING",
+                thread.getAuthor(), forumSlug);
     }
 
     private Boolean isEmptyField(String field) {

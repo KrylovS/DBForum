@@ -10,7 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.util.NumberUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.servlet.http.HttpServletResponse;
@@ -45,27 +44,22 @@ public class Controller {
     @Autowired
     DBService dbService;
 
-
     @PostMapping(value = "/api/forum/create")
     public ForumModel createForum(@RequestBody ForumModel forumModel, HttpServletResponse response) {
         try {
-            final ForumModel existedForum = forumService.getForum(forumModel.getSlug());
+            final UserModel userModel = userService.getUser(forumModel.getUser());
+            forumModel.setUser(userModel.getNickname());
+            forumService.create(forumModel);
+            response.setStatus(HttpServletResponse.SC_CREATED);
+            ForumModel forumModel1 = forumService.getForum(forumModel.getSlug());
+            return forumService.getForum(forumModel.getSlug());
+        } catch (DuplicateKeyException e1) {
             response.setStatus(HttpServletResponse.SC_CONFLICT);
-            return existedForum;
-        } catch (DataAccessException e) {
-            try {
-                final UserModel userModel = userService.getUser(forumModel.getUser());
-                forumModel.setUser(userModel.getNickname());
-                forumService.create(forumModel);
-                response.setStatus(HttpServletResponse.SC_CREATED);
-                ForumModel forumModel1 = forumService.getForum(forumModel.getSlug());
-                return forumService.getForum(forumModel.getSlug());
-            } catch (DataAccessException e1) {
-                response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-                return null;
-            }
+            return forumService.getForum(forumModel.getSlug());
+        } catch (DataAccessException e2) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return null;
         }
-
     }
 
     @PostMapping(value = "/api/forum/{slug}/create")
@@ -87,18 +81,17 @@ public class Controller {
         }
 
         try {
-            final ThreadModel existedThread = threadService.getThread(threadModel);
-            response.setStatus(HttpServletResponse.SC_CONFLICT);
-            return existedThread;
-        } catch (DataAccessException e) {
             threadModel.setAuthor(userModel.getNickname());
             threadModel.setForum(forumModel.getSlug());
             threadService.createThread(threadModel);
             forumService.incrementThreads(forumModel.getSlug());
+            threadService.updateUserForum(threadModel, forumModel.getSlug());
             response.setStatus(HttpServletResponse.SC_CREATED);
-
+        } catch (DataAccessException e) {
+            response.setStatus(HttpServletResponse.SC_CONFLICT);
             return threadService.getThread(threadModel);
         }
+        return threadService.getThread(threadModel);
     }
 
     @GetMapping(value = "api/forum/{slug}/details")
@@ -118,19 +111,14 @@ public class Controller {
                                         @RequestParam(value = "since", defaultValue = "") String since,
                                         @RequestParam(value = "desc", defaultValue = "false") Boolean desc,
                                         HttpServletResponse response) {
-        try{
-            forumService.getForum(slug);
+        final ForumModel forumModel;
+        try {
+            forumModel = forumService.getForum(slug);
         } catch (DataAccessException e) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return null;
         }
-        List<ThreadModel> threadModelList = threadService.getThreads(slug,limit,since,desc);
-        if(threadModelList == null) {
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return null;
-        } else {
-            return threadModelList;
-        }
+        return threadService.getThreads(forumModel.getSlug(),limit,since,desc);
     }
 
     @GetMapping(value = "api/forum/{slug}/users")
@@ -202,48 +190,57 @@ public class Controller {
     @PostMapping(value = "api/thread/{slug_or_id}/create")
     public List<PostModel> createPosts(@PathVariable("slug_or_id") String slugOrId, @RequestBody List<PostModel> postModelList,
                                        HttpServletResponse response) {
-        final Timestamp createdTime = new Timestamp(System.currentTimeMillis());
+        if(postModelList.isEmpty()) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return null;
+        }
+
         final ThreadModel threadModel = getThreadBySlugOrId(slugOrId);
         if(threadModel == null) {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return null;
         }
 
+        final ForumModel forumModel;
         try {
-            final ForumModel forumModel = forumService.getForum(threadModel.getForum());
+            forumModel = forumService.getForum(threadModel.getForum());
+        } catch (DataAccessException e) {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return null;
+        }
+
+        final Timestamp createdTime = new Timestamp(System.currentTimeMillis());
+        PostModel parent;
+
+        try {
             for (PostModel post : postModelList) {
+
+                final Integer parentId = post.getParent();
+                if (parentId != null && !parentId.equals(0)) {
+                    try {
+                        parent = postService.getPostByIdAndThread(parentId, threadModel.getId());
+                        if (!threadModel.getId().equals(parent.getThread())) {
+                            response.setStatus(HttpServletResponse.SC_CONFLICT);
+                            return null;
+                        }
+                    } catch (DataAccessException e) {
+                        response.setStatus(HttpServletResponse.SC_CONFLICT);
+                        return null;
+                    }
+                }
                 post.setForum(forumModel.getSlug());
                 post.setThread(threadModel.getId());
                 post.setCreated(createdTime);
             }
 
-            for (PostModel post : postModelList) {
-
-                try {
-                    userService.getUser(post.getAuthor());
-                } catch (DataAccessException e) {
-                    response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-                    return null;
-                }
-
-                final Integer parentId = post.getParent();
-                if (parentId != null && !parentId.equals(0)) {
-                    postService.getPostByIdAndThread(parentId, threadModel.getId());
-                }
-
-                postService.create(post);
-            }
+            postService.create(postModelList);
             forumService.increasePost(forumModel.getSlug(),postModelList.size());
+            postService.updateUserForum(postModelList, forumModel.getSlug());
             response.setStatus(HttpServletResponse.SC_CREATED);
-            Integer id = postService.getLastPostId();
-            if(id == null) {
-                id = 0;
-            }
-            return postService.getPostsWhereIdGreater(id - postModelList.size());
-
+            return postModelList;
 
         } catch (DataAccessException e) {
-            response.setStatus(HttpServletResponse.SC_CONFLICT);
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return null;
         }
     }
@@ -296,7 +293,6 @@ public class Controller {
         }
         return threadModel;
     }
-
 
     @PostMapping(value = "api/thread/{slug_or_id}/details")
     public ThreadModel updateThread(@PathVariable("slug_or_id") String slugOrId, @RequestBody ThreadModel newThreadModel,
